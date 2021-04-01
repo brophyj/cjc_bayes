@@ -1,0 +1,237 @@
+---
+title: "EXCEL"
+author: "Jay Brophy"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+  html_document:
+    code_folding: hide
+    highlight: tango
+    theme: cerulean
+    toc: yes
+    toc_float: yes
+  pdf_document:
+    toc: yes
+link-citations: yes
+linkcolor: red
+urlcolor: blue
+---
+
+
+```{r setup, include=FALSE, results='asis', warning=FALSE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+packages <- c("ggplot2", "metafor", "meta", "tidyverse", "rjags", "rstan", "R2jags", "bayesmeta", "mcmcplots", "ggthemes", "knitr","kableExtra", "coda")
+invisible(lapply(packages, function(xxx) suppressMessages(require(xxx, character.only = TRUE, quietly=TRUE, warn.conflicts = FALSE))))
+```
+
+## Produces EXCEL figures for CJC Bayesian publication
+
+### Entering data primary outcome
+
+```{r results='asis', warning=FALSE, message=FALSE}
+
+# mortality data entered as NOBLE, SYNTAX,  EXCEL, PRECOMBAT (leave oout these small trials Boudriot) 
+# composite endpoint for Noble = sum mortality+Mi+stroke PCI= 54+43+21=118; CABG=50+15+12=77
+Mc<- 89 #mortality in non-expose (CABG)
+Nc<-957 #total in non-expose
+Me<-119 #mortality in expose (PCI)
+Ne<- 948 #total in expose
+Pc<-176 #primary composite Death, MI, stroke  in control in non-expose (CABG)
+Pe<-203 #primary composite Death, MI, stroke  in control in in expose (PCI)
+Re <- 290 #event in expose (PCI) - MACCE includes revasc
+Rc <- 228 #event in non-expose (CABG) - MACCE includes revasc
+
+
+temp <- data.frame(Mc=Mc,Me=Me,Pc=Pc, Pe=Pe, Rc=Rc, Re=Re, Nc=Nc, Ne=Ne)
+temp$Study <- c("EXCEL")
+temp <- temp[c(9,1:8)] # reorder columns
+
+kable(temp, caption="Outcomes at 5 years") %>%
+  kable_styling(bootstrap_options = "striped", full_width = F)
+
+ #write.csv(temp, file = "data1.csv", row.names = FALSE)
+Ex_p_c <- temp[1,4]
+Ex_p_e <- temp[1,5]
+Ex_n_c <- temp[1,8]
+Ex_n_e <- temp[1,9]
+
+set.seed(1234)
+#Prior is beta(1,1)
+# sampling 100,000 random variables from posterior
+post_Ex_p_c <- rbeta(100000, Ex_p_c + 1, Ex_n_c - Ex_p_c + 1 )
+post_Ex_p_e <- rbeta(100000, Ex_p_e + 1, Ex_n_e - Ex_p_e + 1 )
+
+# calculting posterior of differences
+post_Ex_p_diff <- post_Ex_p_e - post_Ex_p_c
+paste("EXCEL data alone - Differences in MACE between PCI & CABG")
+quantile(post_Ex_p_diff, probs = c(0.025, .5, 0.975))
+
+# probabilities >0 and >1
+paste("EXCEL data alone - Probability PCI worse than CABG = ", sum(post_Ex_p_diff*100 >0)/100000)
+paste("EXCEL data alone - Probability PCI worse than CABG by >1% = ", sum(post_Ex_p_diff*100 >1)/100000)
+
+
+# given large sample sizes, can verify answers with normal approximation
+paste("With normal approximation, EXCEL data alone - Probability PCI worse than CABG = ", round(1-pnorm(0, mean(post_Ex_p_diff*100), sd(post_Ex_p_diff*100)),3))
+paste("With normal approximation, EXCEL data alone - Probability PCI worse than CABG > 1% = ", round(1-pnorm(1, mean(post_Ex_p_diff*100), sd(post_Ex_p_diff*100)),3))
+
+```
+
+The calculated differrence in event ratios are based on the ratios of events to total populations in each arm. They do not include time to event as reported in the orginal NEJM publication and are consequentlty slightly different than the reported event rates.
+
+### EXCEL Primary outcome graph - Figure 1a
+
+```{r}
+fig1a <- ggplot(data.frame(x = c(-3, 8)), aes(x = x)) +
+        stat_function(fun = dnorm, args = list(mean(post_Ex_p_diff*100), sd(post_Ex_p_diff*100)),  colour = "orange", size=2) +
+        scale_x_continuous(name = "Primary outcome difference (PCI - CABG) -> PCI worse") +
+        scale_y_continuous(name = "Density") +
+        labs(title="EXCEL PDF for primary composite outcome (risk difference)",
+             subtitle = "Non-informative prior", caption="AUC = area under the curve\n     PDF = probability density function") +
+        geom_vline(xintercept=mean(post_Ex_p_diff*100)) +
+        annotate("text", label = "Black vertical line =\nmean outcome difference \n(3.0%) increased with PCI", x = 5.0, y = .2, color = "black", hjust = 0) +
+        annotate("text", label = "Grey AUC = \nprobability (87%) \nPCI > CABG outcome \nby > 1%", x = 5.5, y = .12, color = "black", hjust = 0) +
+         annotate("text", label = "Grey + yellow AUC =\nprobability (95%) \nPCI > CABG outcome", x = -2, y = .18, color = "black", hjust = 0) +
+        theme_classic(base_size = 10) +
+        stat_function(fun = dnorm, args = list(mean(post_Ex_p_diff*100), sd(post_Ex_p_diff*100)), xlim = c(1,8), geom = "area", alpha = 0.2) +
+        stat_function(fun = dnorm, args = list(mean(post_Ex_p_diff*100), sd(post_Ex_p_diff*100)), xlim = c(0,1), geom = "area", alpha = 0.2, fill = "yellow") 
+fig1a
+
+pdf("output/fig1a.pdf")
+fig1a 
+dev.off()
+
+ggsave("output/fig1a.png")  
+```
+
+
+### EXCEL Mortality difference - Figure 1b
+Bayesian probability difference based on non-informative prior
+
+```{r}
+# Excel data
+Ex_m_c <- temp[1,2]
+Ex_m_e <- temp[1,3]
+Ex_n_c <- temp[1,8]
+Ex_n_e <- temp[1,9]
+
+#Prior is beta(1,1)
+# sampling 10,000 RV from posterior
+set.seed(1234)
+post_Ex_m_c <- rbeta(10000, Ex_m_c + 1, Ex_n_c - Ex_m_c + 1 )
+post_Ex_m_e <- rbeta(10000, Ex_m_e + 1, Ex_n_e - Ex_m_e + 1 )
+
+# calculting posterior of differences
+post_Ex_m_diff <- post_Ex_m_e - post_Ex_m_c
+quantile(post_Ex_m_diff, probs = c(0.025, .5, 0.975))
+
+1-pnorm(0, mean(post_Ex_m_diff*100), sd(post_Ex_m_diff*100))
+1-pnorm(1, mean(post_Ex_m_diff*100), sd(post_Ex_m_diff*100))
+
+# graph
+fig1b <- ggplot(data.frame(x = c(-2, 7.5)), aes(x = x)) +
+        stat_function(fun = dnorm, args = list(mean(post_Ex_m_diff*100), sd(post_Ex_m_diff*100)), colour = "orange", size=2) +
+        scale_x_continuous(name = "Total mortality difference (PCI - CABG) -> PCI worse") +
+        scale_y_continuous(name = "Density") +
+        labs(title="EXCEL PDF for total mortality (risk difference)",
+             subtitle = "Non-informative prior", caption="AUC = area under the curve\n     PDF = probability density function") +
+        geom_vline(xintercept=mean(post_Ex_m_diff*100)) +
+        annotate("text", label = "Black vertical line  =\n mean outcome \n difference (3.2%) \nincreased with PCI", x = 5.5, y = .15, color = "black",  hjust = 0) +
+        annotate("text", label = "Grey AUC = probability (94%) \n PCI > CABG outcome by > 1%", x = 4.2, y = .24, color = "black",  hjust = 0) +
+         annotate("text", label = "Grey + yellow AUC =\n probability (99%) \n PCI > CABG outcome", x = -1, y = .22, color = "black", hjust = 0) +
+        theme_classic() +
+        stat_function(fun = dnorm, args = list(mean(post_Ex_m_diff*100), sd(post_Ex_m_diff*100)), xlim = c(1,8), geom = "area", alpha = 0.2) +
+        stat_function(fun = dnorm, args = list(mean(post_Ex_m_diff*100), sd(post_Ex_m_diff*100)), xlim = c(0,1), geom = "area", alpha = 0.2, fill = "yellow") 
+fig1b
+
+pdf("output/fig1b.pdf")
+fig1b 
+dev.off()
+
+ggsave("output/fig1b.png")  
+```
+
+
+
+### EXCEL MACCE outcome difference _ Figure 1c
+Bayesian probability difference based on non-informative prior
+
+```{r}
+# Excel data
+Ex_r_c <- temp[1,6]
+Ex_r_e <- temp[1,7]
+Ex_n_c <- temp[1,8]
+Ex_n_e <- temp[1,9]
+
+set.seed(1234)
+#Prior is beta(1,1)
+# sampling 100,000 RV from posterior
+post_Ex_r_c <- rbeta(100000, Ex_r_c + 1, Ex_n_c - Ex_r_c + 1 )
+post_Ex_r_e <- rbeta(100000, Ex_r_e + 1, Ex_n_e - Ex_r_e + 1 )
+
+# calculting posterior of differences
+post_Ex_r_diff <- post_Ex_r_e - post_Ex_r_c
+paste("EXCEL data alone - Differences in MACCE between PCI & CABG")
+quantile(post_Ex_r_diff, probs = c(0.025, .5, 0.975))
+
+# probability > 0
+sum(post_Ex_r_diff*100 >0)/100000
+# probability > 3
+sum(post_Ex_r_diff*100 >3)/100000
+
+Ex_diff_df <- data.frame(post_Ex_r_diff)
+Ex_diff_df$post_Ex_r_diff <- Ex_diff_df$post_Ex_r_diff*100
+
+
+# graph
+fig1c <- ggplot(data.frame(x = c(0, 14)), aes(x = x)) +
+        stat_function(fun = dnorm, args = list(mean(post_Ex_r_diff*100), sd(post_Ex_r_diff*100)), colour = "orange", size=2) +
+        scale_x_continuous(name = "Secondary composite outcome difference (PCI - CABG) -> PCI worse") +
+        scale_y_continuous(name = "Density") +
+        labs(title="EXCEL PDF for secondary composite outcome (risk difference)",
+             subtitle = "Non-informative prior", caption="AUC = area under the curve\n     PDF = probability density function") +
+        geom_vline(xintercept=mean(post_Ex_r_diff*100)) +
+        annotate("text", label = "Black vertical line  = mean outcome \n difference (6.7%) increased with PCI", x = 8, y = .18, color = "black",  hjust = 0) +
+        annotate("text", label = "Grey AUC = probability (97%) \n PCI > CABG outcome by > 3%", x = 9, y = .12, color = "black",  hjust = 0) +
+         annotate("text", label = "Grey + yellow AUC = \nprobability (99.9%) \n PCI > CABG outcome", x = 0.5, y = .16, color = "black",  hjust = 0) +
+        theme_classic() +
+        stat_function(fun = dnorm, args = list(mean(post_Ex_r_diff*100), sd(post_Ex_r_diff*100)), xlim = c(3,14), geom = "area", alpha = 0.2) +
+        stat_function(fun = dnorm, args = list(mean(post_Ex_r_diff*100), sd(post_Ex_r_diff*100)), xlim = c(0,3), geom = "area", alpha = 0.2, fill = "yellow") 
+fig1c
+
+pdf("output/fig1c.pdf")
+fig1c 
+dev.off()
+
+ggsave("output/fig1c.png")  
+```
+
+## Combining graphs
+
+```{r fig.width=20}
+library (patchwork)
+
+fig1 <- fig1a + fig1b + fig1c
+fig1
+
+pdf("output/fig1.pdf")
+fig1
+dev.off()
+
+ggsave("output/excel_fig3.png")  
+
+## create jpeg file
+jpeg(filename = "output/fig1.jpeg", width = 7480, height = 7480,
+     pointsize = 8, quality = 75, bg = "white", res = 600)
+fig1
+dev.off()
+```
+
+## Session info
+
+```{r}
+R.version
+sessionInfo()
+```
+
+## References

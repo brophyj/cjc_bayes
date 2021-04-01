@@ -1,0 +1,30 @@
+﻿Variable,Count,Percent,Low,Point Estimate,High,Spironolactone,Placebo,P Value
+,,,,,,,,
+US,1151,33.4,,,,162/572,180/579,0.3045
+standard,,,-8,-2.8,2.5,,,
+hierarchical,,,-6.3,-2.1,2.2,,,
+,,,,,,,,
+Canada,326,9.5,,,,52/166,66/160,0.06231
+standard,,,-20.3,-9.9,4.7,,,
+hierarchical,,,-11.6,-3.9,3.8,,,
+,,,,,,,,
+Argentina,123,3.6,,,,18/63,20/60,0.5678
+standard,,,-21.1,-4.8,11.6,,,
+hierarchical,,,-9.8,-2.2,5.4,,,
+,,,,,,,,
+Brazil,167,4.8,,,,10/85,14/82,0.3283
+standard,,,-16,-5.3,5.3,,,
+hierarchical,,,-9.2,-2.6,4,,,
+,,,,,,,,
+Russia,1066,30.9,,,,63/529,55/537,0.3857
+standard,,,-2.1,1.7,5.4,,,
+hierarchical,,,-3,0.4,4,,,
+,,,,,,,,
+Georgia,612,17.8,,,,15/307,16/305,0.8391
+standard,,,-3.8,0.4,3.1,,,
+hierarchical,,,-3.7,-0.01,2.3,,,
+,,,,,,,,
+Combined,,,,,,,,
+NEJM,3445,100,-4.4,-1.8,0.9,320/1722,351/1723,0.14
+Hierarchical (pooled),,,-7.2,-1.6,2.6,,,
+Hierarchical (predicted),,,-13.5,-1.4,8.4,,,

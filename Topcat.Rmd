@@ -1,0 +1,576 @@
+---
+title: "Topcat"
+author: "Jay Brophy"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+  html_document:
+    code_folding: hide
+    highlight: tango
+    theme: cerulean
+    toc: yes
+    toc_float: yes
+  pdf_document:
+    toc: yes
+link-citations: yes
+linkcolor: red
+urlcolor: blue
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+packages <- c("ggplot2", "knitr", "kableExtra", "metafor", "meta", "tidyverse", "rjags", "rstan", "R2jags", "bayesmeta", "mcmcplots")
+invisible(lapply(packages, function(xxx) suppressMessages(require(xxx, character.only = TRUE, quietly=TRUE, warn.conflicts = FALSE))))
+
+# useful functions
+s_graph <- function(hr, uci, lci){
+    se <- (log(uci)-log(lci))/(2*1.96)         #.86 0.72 to 1.04 (log se)
+    x <- seq(0.01, 0.50,by = .005)
+    lci <- exp(log(hr) - (qnorm(x) * se))
+    uci <- exp(log(hr) + (qnorm(x) * se))
+    lci <- rev(lci)
+    hr <- rev(c(uci, lci))
+    yy <- 2*x
+    yy <- c(yy,rev(yy))
+    ss <- -log(yy, base=2)
+    df1 <- data.frame(hr,ss)
+    df1 <- df1[-297,]
+    s <- ggplot(df1, aes( hr,ss)) +
+        geom_line() +
+        xlim(0.01,1.2) +
+        scale_x_continuous(trans='log10') +
+        ylab("Bits of information against HR (binary S value)") +
+        xlab("Hazard ratio (Log scale)") +
+        labs (subtitle = "S-Values (surprisals) for a range of hazard ratios (HR)") +
+        geom_vline(xintercept=1.0, color = "green") +
+        annotate("text", x=1,y=.4, label="null hypothesis") +
+        theme_bw()
+        return(s)
+}
+
+# function to make S dataset (already intrinsically done in pv_graph and s_graph) but this allows it to exported
+
+s.make <- function(h, uci, lci){
+    x <- seq(0.0001, 0.50,length.out = 100)   # p value  x <- seq(0.01, 0.50,by = .005) 
+    se <- (log(uci)-log(lci))/(2*1.96) 
+    p1 <- exp(log(h) - (qnorm(x) * se))
+    p2 <- exp(log(h) + (qnorm(x) * se))
+    p2 <- rev(p2)
+    hr <- rev(c(p1,p2[-1]))
+    prob <- c(2*x, rev(2*x)[-1])
+    s <- -log(prob, base=2)
+    df1 <- data.frame(hr, prob, s)
+    return(df1)
+}
+```
+
+
+# Useful functions
+
+```{r fun}
+###Plot function
+#Please note that the upper_limit is manually defined to avoid ggplot to adjust it. You may have to change it.
+#You may have to tweak this
+my.func1 <- function(my_sd=0.28,my_mean=log(0.7047),prob_harm=TRUE,upper_limit=6){
+  #Merely defines the subtitle of the figure
+  my_text=ifelse(prob_harm,
+  paste0("Probability OR>1 = ",round((1-pnorm(0,my_mean,my_sd))*100,2),"%"),
+  paste0("Probability OR<1 = ",round((pnorm(0,my_mean,my_sd))*100,2),"%"))
+  #Defines which area will be shaded
+  my_multiplier=ifelse(prob_harm,1,-1)
+  #Defines color
+  my_color=ifelse(prob_harm,"blue","red")
+  #Actually builds the plot
+  my_plot<-ggplot(data = data.frame(x = c(-.4, .2)), aes(x)) + #Empty plot
+  geom_vline(xintercept = my_mean, color=my_color)+ #Vertical line
+  geom_vline(xintercept = 0, linetype = 2)+ #Vertical Line
+  stat_function(fun = dnorm, n = 1000, args = list(mean = my_mean, sd = my_sd), linetype=1)+
+  geom_area(stat = "function", fun = dnorm, args = list(mean = my_mean, sd = my_sd),
+  fill = "darkgray", xlim = c(0,1*my_multiplier), alpha=0.9)+
+  theme(plot.title = element_text(hjust = 0, size = 24))+ #You can change if you want
+  labs(x="log(OR)", y="", title=paste0("Data (likelihood function) for TOPCAT trial"), subtitle=my_text)+
+  coord_cartesian(xlim=c(-.4, .2),ylim=c(0,upper_limit)) 
+return(my_plot)  #Returns plot
+}
+
+# function to analytically combine normal distributions
+post <- function(prior.mean, prior.sd, data.mean, data.sd){
+  wt.prior <- 1/ prior.sd^2
+  wt.data <- 1/ data.sd^2
+  post.mean <- (wt.prior  * prior.mean + wt.data * data.mean) / (wt.prior + wt.data)
+  post.sd <- sqrt((wt.prior + wt.data)^-1)
+  results <- list(post.mean, post.sd)
+  return(results)
+}
+
+
+###END###
+```
+
+# TOPCAT
+
+In this [NEJM](https://www.nejm.org/doi/10.1056/NEJMoa1313731?url_ver=Z39.88-2003&rfr_id=ori:rid:crossref.org&rfr_dat=cr_pub%20%200pubmed) multicenter, double-blind, randomized trial, 3445 patients with symptomatic
+heart failure (HF) and a left ventricular ejection fraction > 45% were assigned to either
+spironolactone (15 to 45 mg daily) or placebo. The primary outcome was a composite
+of death from cardiovascular causes, aborted cardiac arrest, or HF hospitalization. After a
+mean follow-up of 3.3 years, the primary outcome occurred in 320 of
+1722 patients in the spironolactone group (18.6%) and 351 of 1723 patients in
+the placebo group (20.4%) (hazard ratio, 0.89; 95% confidence interval [CI], 0.77
+to 1.04; P = 0.14). HF hospitalization had a significantly lower incidence with spironolactone 
+(206 patients [12.0%] vs. 245 patients [14.2%]; HR, 0.83; 95% CI, 0.69 to 0.99, P = 0.04). Neither total deaths nor hospitalizations for any reason were significantly reduced by spironolactone. The authors concluded “In patients with heart failure and a preserved ejection fraction, treatment with spironolactone did not significantly reduce the incidence of the primary composite outcome of death from cardiovascular causes, aborted cardiac arrest, or HF hospitalization.” 
+
+## TOPCAT data
+```{r}
+mat <- matrix(c(320, 351, 1722-320, 1723-351), nrow=2 )
+rownames(mat) <- c("Drug", "Placebo") 
+colnames(mat) <- c("Event+", "Event-") 
+kable(mat)
+
+epiR::epi.2by2(mat, outcome = "as.rows")
+prop.test(c(320,351), c(1722,1723))
+
+# looking at the strength of the evidence from a frequentist viewpoint
+s_graph(0.83, 1.04, 0.77)
+kable(head(s.make(0.83, 1.04, 0.77)))
+
+topcat <- data.frame(region = c("overall"))
+topcat$d0 <- c(351)
+topcat$n0 <- c(1723)
+topcat$d1 <- c(320)
+topcat$n1 <- c(1722)
+
+
+topcat$p1 <- topcat$d1/topcat$n1
+topcat$p0 <- topcat$d0/topcat$n0
+topcat$rr <- topcat$p1/topcat$p0
+topcat$lrr <- log(topcat$rr)
+topcat$lse <- sqrt((1 - topcat$p1)/(topcat$p1 * topcat$n1) + (1 - topcat$p0)/(topcat$p0 * topcat$n0))
+topcat$lower <- exp(topcat$lrr - qnorm(.975) * topcat$lse)
+topcat$upper <- exp(topcat$lrr + qnorm(.975) * topcat$lse)
+
+
+kable(topcat, caption="TOPCAT overall outcomes at 5 years") %>%
+  kable_styling(bootstrap_options = "striped", full_width = F)
+
+```
+The evidence aginat the null hypothesis is the equivalent of 4.6 heads tosses of a fair coins (probability $\approx$ 0.04). There is an equal amount of evidence against a benefit or 31% reduction.    
+I don't have time to event data but simply treating the data as a 2X2 contingency data does give similar results (RR 0.89, 95% CI 0.77 - 1.04).     
+
+### TOPCAT by country
+It is remarkably difficult to find the raw numbers according to country, although much noise has appeared regarding possible geographic variations. Many studies combine Georgia and Russia and compare to either NA countries or all other countries, although these comparisons are totally post hoc. Country hazard ratios and total number of events were found [here](https://www.jacc.org/doi/full/10.1016/j.jacbts.2016.03.001?_ga=2.149594998.1163466078.1608858463-9334065.1608858463) while the number randomized to each group by country was found at the [clinicaltrials.gov](https://clinicaltrials.gov/ct2/show/NCT00094302). Also page 38 from [FDA](https://www.fda.gov/media/144411/download) provides some data by regions. Using this data as well as the following slide ![](slide 17.png) presented to the [FDA](https://www.fda.gov/media/144549/download) it was possible to approximately back calculate the number of events in each arm in each country.    
+It is truly amazing that the google search "topcat trial spironolactone geographic variations" produces 3,220 hits but at least for the top 25 hits the raw data is not available
+```{r}
+topcat_c <- data.frame(region = c("US", "Canada", "Argentina", "Brazil", "Russia", "Georgia"))
+
+
+topcat_c$n0 <- c(579, 160, 60, 82, 537, 305)
+topcat_c$n1 <- c(572, 166, 63, 85, 529, 307)
+topcat_c$dt <- c(230, 49, 18, 9, 62, 14)
+topcat_c$rr <- c(.786, .642, .745, .473, .95, .99)
+
+topcat_c <- topcat_c %>% 
+  mutate(dt = round(dt*1.76,0)) %>% 
+  mutate(d0 = round(dt / (rr + 1),0)) %>% 
+  mutate(d1 = dt - d0)
+
+# arbitrary correcting to get FDA numbers for NA, SA EE
+topcat_c$d0 <- c(180,66,20,14,55,16)
+topcat_c$d1 <- c(162,52,18,10,63,15)
+topcat_c <- topcat_c[,c(1:3,6,7)]
+topcat_c$p1 <- topcat_c$d1/topcat_c$n1
+topcat_c$p0 <- topcat_c$d0/topcat_c$n0
+topcat_c$rr <- topcat_c$p1/topcat_c$p0
+topcat_c$lrr <- log(topcat_c$rr)
+topcat_c$lse <- sqrt((1 - topcat_c$p1)/(topcat_c$p1 * topcat_c$n1) + (1 - topcat_c$p0)/(topcat_c$p0 * topcat_c$n0))
+topcat_c$lower <- exp(topcat_c$lrr - qnorm(.975) * topcat_c$lse)
+topcat_c$upper <- exp(topcat_c$lrr + qnorm(.975) * topcat_c$lse)
+
+
+# make regional dataframe posthoc definitionas in published documents including FDA
+r_na <- topcat_c[1,c(2:5)] + topcat_c[2,c(2:5)]
+r_sa <- topcat_c[3,c(2:5)] + topcat_c[4,c(2:5)]
+r_ee <- topcat_c[5,c(2:5)] + topcat_c[6,c(2:5)]
+
+topcat_r <- data.frame(rbind (r_na, r_sa, r_ee))
+topcat_r$region <- c("NA", "SA", "EE")
+topcat_r <- topcat_r[,c(5,1,2,3,4)]
+
+topcat_r$p1 <- topcat_r$d1/topcat_r$n1
+topcat_r$p0 <- topcat_r$d0/topcat_r$n0
+topcat_r$rr <- topcat_r$p1/topcat_r$p0
+topcat_r$lrr <- log(topcat_r$rr)
+topcat_r$lse <- sqrt((1 - topcat_r$p1)/(topcat_r$p1 * topcat_r$n1) + (1 - topcat_r$p0)/(topcat_r$p0 * topcat_r$n0))
+topcat_r$lower <- exp(topcat_r$lrr - qnorm(.975) * topcat_r$lse)
+topcat_r$upper <- exp(topcat_r$lrr + qnorm(.975) * topcat_r$lse)
+
+## @knitr forest_plot "metafor" library
+p <- forest.default(x = topcat_r$rr, ci.lb = topcat_r$lower, ci.ub = topcat_r$upper, 
+       slab = paste(topcat_r$region), refline = 1)
+text(min(p$xlim), .88 * max(p$ylim), "Study - Post hoc data grouping reported to FDA", pos = 4, font = 2)
+
+kable(topcat_r)
+
+p1 <- forest.default(x = topcat_c$rr, ci.lb = topcat_c$lower, ci.ub = topcat_c$upper, 
+       slab = paste(topcat_c$region), refline = 1)
+text(2*min(p$xlim), 1.5* max(p$ylim), "Study  - 6 countries as randomized - numbers inferred as not publicly available", pos = 4, font = 2)
+
+
+kable(topcat_c, caption="TOPCAT primary outcomes by country") %>%
+  kable_styling(bootstrap_options = "striped", full_width = F)
+
+
+```
+## Hierarchical modeling (frequentist)
+
+There are, in general, three ways to estimate the random effects, $\theta_j$  
+* no pooling, each study is separate $\tau = \infty$   
+* completing pooling all $\theta_j$ are from a common distribution, so essentially $\tau = 0$ - this is also known as fixed-effect meta-analysis model completely pools the relative risk estimates across studies. The overall mean is commonly estimated by taking an inverse-variance weighted average of studies.   
+* partial pooling,  the hierarchical model is a compromise between the no-pooling and the complete-pooling estimates. The parameters of the hierarchical model can be estimated in either a frequentist or a Bayesian framework. In a frequentist setup, point estimates (rather than probability distributions) for the parameters are estimated.    
+Results from data according to 6 countries (probably not exact values)    
+
+### According to  post hoc grouping to 3 regions 
+
+```{r fig.width=10}
+# no pooling - TOPCAT alone - 3 regions
+me.fe <- rma(topcat_r$lrr, topcat_r$lse^2, method = "FE")
+cat("Completely pooled results with the point estimate followed by the 95%CI")
+c(exp(me.fe$b), exp(me.fe$ci.lb), exp(me.fe$ci.ub))
+
+#check to see that the point estimate is identical to taking a weighted average of the relative risks in the RCTs
+#exp(weighted.mean(topcat_r$lrr, 1/(topcat_r$lse^2)))
+
+# frequentist random effects
+me.re <- rma(topcat_r$lrr, topcat_r$lse^2)
+cat("Hierarchical or random effects with the point estimate ", exp(me.re$b), "followed by the 95%CI ",c(exp(me.re$ci.lb), exp(me.re$ci.ub)))
+
+m1 <- meta::metabin(topcat_r$d1, topcat_r$n1, topcat_r$d0, topcat_r$n0, sm="RR", method ="I", 
+                    studlab=topcat_r$region, prediction=TRUE) #, comb.random =TRUE
+meta::forest(m1)
+
+cat("TOPCAT 3 regions hierarchical mean =", exp(m1$TE.random), "with SD of ", m1$seTE.random, "and 95% CI ", c(exp(m1$lower.random),exp(m1$upper.random)))
+
+my.func1(my_sd=0.076,my_mean=log(0.91))
+
+```
+
+### According to 6 countries
+
+```{r fig.width=10}
+# pooling - TOPCAT alone - 6 countries
+me.fe <- rma(topcat_c$lrr, topcat_c$lse^2, method = "FE")
+cat("Completely pooled results with the point estimate followed by the 95%CI")
+c(exp(me.fe$b), exp(me.fe$ci.lb), exp(me.fe$ci.ub))
+
+#check to see that the point estimate is identical to taking a weighted average of the relative risks in the RCTs
+#exp(weighted.mean(topcat_r$lrr, 1/(topcat_r$lse^2)))
+
+# frequentist random effects
+me.re <- rma(topcat_c$lrr, topcat_c$lse^2)
+cat("Hierarchical or random effects with the point estimate ", exp(me.re$b), "followed by the 95%CI ",c(exp(me.re$ci.lb), exp(me.re$ci.ub)))
+
+m1 <- meta::metabin(topcat_c$d1, topcat_c$n1, topcat_c$d0, topcat_c$n0, sm="RR", method ="I", 
+                    studlab=topcat_c$region, prediction=TRUE) #, comb.random =TRUE
+meta::forest(m1)
+
+cat("TOPCAT 6 countries hierarchical mean RR =", exp(m1$TE.random), "with SD of ", m1$seTE.random, "and 95% CI ", c(exp(m1$lower.random),exp(m1$upper.random)))
+
+my.func1(my_sd=0.066,my_mean=log(0.90))
+
+# risk difference
+m2 <- meta::metabin(topcat_c$d1, topcat_c$n1, topcat_c$d0, topcat_c$n0, sm="RD", method ="I", 
+                    studlab=topcat_c$region, prediction=TRUE) #, comb.random =TRUE
+meta::forest(m2)
+
+cat("TOPCAT 6 countries hierarchical RD =", exp(m2$TE.random), "with SD of ", m2$seTE.random, "and 95% CI ", c(exp(m2$lower.random), exp(m2$upper.random)))
+
+cat("TOPCAT 6 countries hierarchical RD =", m2$TE.random, "with SD of ", m2$seTE.random, "and 95% CI ", c(m2$lower.random, m2$upper.random))
+
+
+
+```
+Interestingly there is not much difference between fixed and random effects model when analysed by frequentist methods.
+Will next explore a Bayesian hierarchical model according to 3 regions
+
+```{r}
+require("bayesmeta")
+
+# bayesmeta package for RR for 3 regions of TOPCAT
+
+effsize <- escalc(measure="OR",
+                  ai=d1, n1i=n1,
+                  ci=d0, n2i=n0,
+                  slab=region, data=topcat_r)
+# perform meta-analysis:
+bma <- bayesmeta(effsize, tau.prior = function(t){dhalfnormal(t, scale=0.5)})
+# show results:
+print(bma)
+print("Using bayesmeta package")
+cat("The Bayesian hierarchical random effects RR with vaguely informative prior is ", round(exp(bma$summary[3,2]),2), " with 95% CI ", 
+    round(exp(bma$summary[5,2]),2), 
+    " - ", round(exp(bma$summary[6,2]),2))
+# show forest plot:
+forestplot(bma)
+
+# RD
+effsize <- escalc(measure="RD",
+                  ai=d1, n1i=n1,
+                  ci=d0, n2i=n0,
+                  slab=region, data=topcat_r)
+# perform meta-analysis:
+bma1 <- bayesmeta(effsize, tau.prior = function(t){dhalfnormal(t, scale=0.5)})
+# show results:
+print(bma1)
+print("Using bayesmeta package")
+cat("The Bayesian hierarchical random effects RD with vaguely informative prior is ", round(exp(bma1$summary[3,2]),2), " with 95% CI ", 
+    round(exp(bma1$summary[5,2]),2), 
+    " - ", round(exp(bma1$summary[6,2]),2))
+# show forest plot:
+forestplot(bma1)
+
+#6 countries Bayesian hierarchical for RD
+
+effsize <- escalc(measure="RD",
+                  ai=d1, n1i=n1,
+                  ci=d0, n2i=n0,
+                  slab=region, data=topcat_c)
+# perform meta-analysis:
+bma2 <- bayesmeta(effsize, tau.prior = function(t){dhalfnormal(t, scale=0.5)})
+# show results:
+print(bma2)
+print("Using bayesmeta package")
+cat("The Bayesian hierarchical random effects with vaguely informative prior is ", round(exp(bma2$summary[3,2]),2), " with 95% CI ", round(exp(bma2$summary[5,2]),2), " - ", round(exp(bma2$summary[6,2]),2))
+# show forest plot:
+forestplot(bma2)
+
+# to get data for csv file used to make my forest plot *no exp for RD
+bma2$theta
+ppoint_e <- bma2$theta[5,]
+ll <- bma2$theta[5,] - 1.96*bma2$theta[6,]
+ul <- bma2$theta[5,] + 1.96*bma2$theta[6,]
+
+#raw 
+raw_pe <- bma2$y
+raw_l <- bma2$y - 1.96*bma2$sigma
+raw_u <- bma2$y + 1.96*bma2$sigma
+
+pdf("output/topcast_forest.pdf")
+forestplot(bma2)
+dev.off()
+
+ggsave("output/topcast_forest.png")  
+
+#6 countries Bayesian hierarchical for RR
+
+effsize <- escalc(measure="OR",
+                  ai=d1, n1i=n1,
+                  ci=d0, n2i=n0,
+                  slab=region, data=topcat_c)
+# perform meta-analysis:
+bma2_RR <- bayesmeta(effsize, tau.prior = function(t){dhalfnormal(t, scale=0.5)})
+# show results:
+print(bma2_RR)
+print("Using bayesmeta package")
+cat("The Bayesian hierarchical random effects with vaguely informative prior is ", round(exp(bma2_RR$summary[3,2]),2), " with 95% CI ", round(exp(bma2_RR$summary[5,2]),2), " - ", round(exp(bma2_RR$summary[6,2]),2))
+# show forest plot:
+forestplot(bma2_RR)
+
+bma2_RR$theta # shrunken measures to get data for csv file
+
+ppoint_e <- exp(bma2_RR$theta[5,])
+ll <- exp(bma2_RR$theta[5,] - 1.96*bma2_RR$theta[6,])
+ul <- exp(bma2_RR$theta[5,] + 1.96*bma2_RR$theta[6,])
+
+
+pdf("output/topcast_forest_RR.pdf")
+forestplot(bma2_RR)
+dev.off()
+
+ggsave("output/topcast_forest_RR.png")  
+
+
+```
+
+
+## Plots
+### Bayesian analysis with non-informative prior - TOPCAT analyzed all data identical
+
+```{r}
+
+set.seed(1234)
+#Prior is beta(1,1)
+# sampling 100,000 random variables from posterior
+post_Ex_p_c <- rbeta(100000, topcat$d0 + 1, topcat$n0 - topcat$d0 +1)
+post_Ex_p_e <- rbeta(100000, topcat$d1 + 1, topcat$n1 - topcat$d1 +1)
+
+# calculting posterior of differences
+post_Ex_p_diff <- post_Ex_p_e - post_Ex_p_c
+paste("TOPCAT - Differences in primary outcome between spironolactone and placebo")
+quantile(post_Ex_p_diff, probs = c(0.025, .5, 0.975))
+
+# probabilities >0 and >1
+paste("TOPCAT - Probability spironolactone better than placebo = ", sum(post_Ex_p_diff*100 <0)/100000)
+paste("TOPCAT - Probability spironolactone better than placebo by >1% = ", sum(post_Ex_p_diff*100 < -1)/100000)
+
+
+# given large sample sizes, can verify answers with normal approximation
+paste("With normal approximation, TOPCAT - Probability spironolactone worse than placebo = ", round(pnorm(0, mean(post_Ex_p_diff*100), sd(post_Ex_p_diff*100)),3))
+paste("With normal approximation, TOPCAT - Probability spironolactone better than placebo > 1% = ", round(pnorm(-1, mean(post_Ex_p_diff*100), sd(post_Ex_p_diff*100)),3))
+
+# plot
+
+ggplot(data.frame(x = c(-6, 3)), aes(x = x)) +
+        stat_function(fun = dnorm, args = list(mean(post_Ex_p_diff*100), sd(post_Ex_p_diff*100)),  colour = "orange", size=2) +
+        scale_x_continuous(name = "Primary outcome difference (spironolactone - placebo)") +
+        scale_y_continuous(name = "Density") +
+        labs(title="TOPCAT PDF for primary outcome (risk difference)",
+             subtitle = "Non-informative prior using all data", caption="AUC = area under the curve\n     PDF = probability density function") +
+        geom_vline(xintercept=mean(post_Ex_p_diff*100)) +
+        annotate("text", label = "Black vertical line = mean outcome \n difference (1.80%) decreased with\n spironolactone", x = -5, y = .10, color = "black", hjust=0) +
+        annotate("text", label = "Grey AUC = probability (72%) \n spironolactone better placebo by > 1%", x = -5, y = .25, color = "black", hjust=0) +
+         annotate("text", label = "Grey + yellow AUC = probability (92%) \n spironolactone better placebo", x = -1, y = .15, color = "black", hjust=0) +
+        theme_classic() +
+        stat_function(fun = dnorm, args = list(mean(post_Ex_p_diff*100), sd(post_Ex_p_diff*100)), xlim = c(-6,-1), geom = "area", alpha = 0.2) +
+        stat_function(fun = dnorm, args = list(mean(post_Ex_p_diff*100), sd(post_Ex_p_diff*100)), xlim = c(-1,0), geom = "area", alpha = 0.2, fill = "yellow") 
+```
+
+### Bayesian analysis with non-informative prior - TOPCAT analyzed frequentist hierarchical model
+```{r}
+
+# uses data from frequentist random effects model m2
+
+set.seed(1234)
+mean_post_diff_freq_hier <-  m2$TE.random
+sd_post_diff_freq_hier <- m2$seTE.random
+
+dist_post_diff_freq_hier <- rnorm(100000, mean_post_diff_freq_hier, sd_post_diff_freq_hier)
+
+paste("TOPCAT - Differences in primary outcome between spironolactone and placebo")
+quantile(dist_post_diff_freq_hier, probs = c(0.025, .5, 0.975))
+
+# probabilities >0 and >1
+paste("TOPCAT - Probability spironolactone better than placebo = ", sum(dist_post_diff_freq_hier <0)/100000)
+paste("TOPCAT - Probability spironolactone better than placebo by >1% = ", sum(dist_post_diff_freq_hier < -.01)/100000)
+
+# plot
+
+ggplot(data.frame(x = c(-5, 3)), aes(x = x)) +
+        stat_function(fun = dnorm, args = list(mean_post_diff_freq_hier*100, sd_post_diff_freq_hier*100), colour = "orange", size=2) +
+        scale_x_continuous(name = "Primary outcome difference (spironolactone - placebo)") +
+        scale_y_continuous(name = "Density") +
+        labs(title="TOPCAT PDF for primary outcome (risk difference)",
+             subtitle = "Non-informative prior using frequentist hierarchical model", caption="AUC = area under the curve\n     PDF = probability density function") +
+        geom_vline(xintercept=mean(mean_post_diff_freq_hier*100)) +
+        annotate("text", label = "Black vertical line = mean outcome \n difference (1.1%) decreased with\n spironolactone", x = -5, y = .10, color = "black", hjust=0) +
+        annotate("text", label = "Grey AUC = probability (54%) \n spironolactone better placebo by > 1%", x = -5, y = .25, color = "black", hjust=0) +
+         annotate("text", label = "Grey + yellow AUC = probability (81%) \n spironolactone better placebo", x = -1, y = .15, color = "black", hjust=0) +
+        theme_classic() +
+        stat_function(fun = dnorm, args = list(mean_post_diff_freq_hier*100, sd_post_diff_freq_hier*100), xlim = c(-5,-1), geom = "area", alpha = 0.2) +
+        stat_function(fun = dnorm, args = list(mean_post_diff_freq_hier*100, sd_post_diff_freq_hier*100), xlim = c(-1,0), geom = "area", alpha = 0.2, fill = "yellow") 
+
+
+```
+### Bayesian analysis with vaguely informative prior - TOPCAT analyzed Bayesian hierarchical model
+
+```{r}
+
+# use model bma2
+
+dist_post_diff_bayes_hier <- rnorm(100000, bma2$summary[3,2], bma2$summary[4,2])
+
+paste("TOPCAT - Differences in primary outcome between spironolactone and placebo")
+quantile(dist_post_diff_bayes_hier, probs = c(0.025, .5, 0.975))
+
+# probabilities >0 and >1
+paste("TOPCAT - Probability spironolactone better than placebo = ", sum(dist_post_diff_bayes_hier <0)/100000)
+paste("TOPCAT - Probability spironolactone better than placebo by >1% = ", sum(dist_post_diff_bayes_hier < -.01)/100000)
+
+# plot
+
+fig_all <- ggplot(data.frame(x = c(-10, 5)), aes(x = x)) +
+        stat_function(fun = dnorm, args = list(mean(dist_post_diff_bayes_hier*100), sd(dist_post_diff_bayes_hier*100)), colour = "orange", size=2) +
+        scale_x_continuous(name = "Primary outcome difference (spironolactone - placebo)") +
+        scale_y_continuous(name = "Density") +
+        labs(title="TOPCAT PDF for primary outcome (risk difference) - all data",
+             subtitle = "Bayesian hierarchical model with vaguely informative prior ", caption="AUC = area under the curve\n     PDF = probability density function") +
+        geom_vline(xintercept=mean(dist_post_diff_bayes_hier*100)) +
+        annotate("text", label = "Black vertical line = mean outcome \n difference (1.8%) decreased with\n spironolactone", x = -9, y = .14, color = "black", hjust=0) +
+        annotate("text", label = "Grey AUC = \nprobability (63%) \n spironolactone better\n placebo by > 1%", x = -9, y = .07,  color = "black", hjust=0) +
+         annotate("text", label = "Grey + yellow AUC =\n probability (76%)\n spironolactone better placebo", x = 1, y = .11, color = "black", hjust=0) +
+        theme_classic() +
+        stat_function(fun = dnorm, args = list(mean(dist_post_diff_bayes_hier*100), sd(dist_post_diff_bayes_hier*100)), xlim = c(-10,-1), geom = "area", alpha = 0.2) +
+        stat_function(fun = dnorm, args = list(mean(dist_post_diff_bayes_hier*100), sd(dist_post_diff_bayes_hier*100)), xlim = c(-1,0), geom = "area", alpha = 0.2, fill = "yellow") 
+
+fig_all
+
+pdf("output/topcat_all.pdf")
+fig_all
+dev.off()
+
+ggsave("output/topcat_all.png", dpi = 300, width = 8, height = 4)  
+```
+
+### Bayesian analysis with vaguely informative prior - TOPCAT analyzed Bayesian hierarchical modelexcluding Russia Georgia
+
+```{r fig.width=8, fig.height=6}
+
+effsize <- escalc(measure="RD",
+                  ai=d1, n1i=n1,
+                  ci=d0, n2i=n0,
+                  slab=region, data=topcat_c[1:4,])
+# perform meta-analysis:
+bma3 <- bayesmeta(effsize, tau.prior = function(t){dhalfnormal(t, scale=0.5)})
+# show results:
+print(bma3)
+print("Using bayesmeta package")
+cat("The Bayesian hierarchical random effects with vaguely informative prior is ", round(exp(bma3$summary[3,2]),2), " with 95% CI ", round(exp(bma3$summary[5,2]),2), " - ", round(exp(bma3$summary[6,2]),2))
+# show forest plot:
+forestplot(bma3)
+
+# use model bma3
+
+dist_post_diff_bayes_hier <- rnorm(100000, bma3$summary[3,2], bma3$summary[4,2])
+
+paste("TOPCAT - Differences in primary outcome between spironolactone and placebo")
+quantile(dist_post_diff_bayes_hier, probs = c(0.025, .5, 0.975))
+
+# probabilities >0 and >1
+paste("TOPCAT - Probability spironolactone better than placebo = ", sum(dist_post_diff_bayes_hier <0)/100000)
+paste("TOPCAT - Probability spironolactone better than placebo by >1% = ", sum(dist_post_diff_bayes_hier < -.01)/100000)
+
+# plot
+
+fig_4 <- ggplot(data.frame(x = c(-20, 10)), aes(x = x)) +
+        stat_function(fun = dnorm, args = list(mean(dist_post_diff_bayes_hier*100), sd(dist_post_diff_bayes_hier*100)), colour = "orange", size=2) +
+        scale_x_continuous(name = "Primary outcome difference (spironolactone - placebo)") +
+        scale_y_continuous(name = "Density") +
+        labs(title="TOPCAT PDF primary outcome (risk difference) - excluding Russia and Georgia ",
+             subtitle = "Bayesian hierarchical model with vaguely informative prior ", caption="AUC = area under the curve\n     PDF = probability density function") +
+        geom_vline(xintercept=mean(dist_post_diff_bayes_hier*100)) +
+        annotate("text", label = "Black vertical line = mean outcome \n difference (5.1%) decreased with\n spironolactone", x = -18, y = .07, color = "black", hjust=0) +
+        annotate("text", label = "Grey AUC =\n probability (79%) \n spironolactone better\n placebo by > 1%", x = -18, y = .04,  color = "black", hjust=0) +
+         annotate("text", label = "Grey + yellow AUC =\n probability (84%) \n spironolactone better placebo", x = 1, y = .06, color = "black", hjust=0) +
+        theme_classic() +
+        stat_function(fun = dnorm, args = list(mean(dist_post_diff_bayes_hier*100), sd(dist_post_diff_bayes_hier*100)), xlim = c(-20,-1), geom = "area", alpha = 0.2) +
+        stat_function(fun = dnorm, args = list(mean(dist_post_diff_bayes_hier*100), sd(dist_post_diff_bayes_hier*100)), xlim = c(-1,0), geom = "area", alpha = 0.2, fill = "yellow") 
+
+fig_4
+
+pdf("output/topcat_4.pdf")
+fig_4
+dev.off()
+
+ggsave("output/topcat_4.png", dpi = 300, width = 8, height = 4)  
+
+library(patchwork)
+topcat_comb <- fig_all + fig_4 + plot_annotation("Figure 7", tag_levels = 'A')
+topcat_comb
+pdf("output/topcat_fig7_comb.pdf")
+topcat_comb
+dev.off()
+
+ggsave("output/topcat_fig7_comb.png", dpi = 300, width = 16, height = 5)  
+
+```
+
+

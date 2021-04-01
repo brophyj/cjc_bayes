@@ -1,0 +1,192 @@
+---
+title: "Paragon"
+author: "Jay Brophy"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+  html_document:
+    code_folding: hide
+    highlight: tango
+    theme: cerulean
+    toc: yes
+    toc_float: yes
+  pdf_document:
+    toc: yes
+link-citations: yes
+linkcolor: red
+urlcolor: blue
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+packages <- c("ggplot2", "metafor", "meta", "tidyverse", "rjags", "rstan", "R2jags", "bayesmeta", "mcmcplots", "knitr")
+invisible(lapply(packages, function(xxx) suppressMessages(require(xxx, character.only = TRUE, quietly=TRUE, warn.conflicts = FALSE))))
+
+# useful functions
+s_graph <- function(hr, uci, lci){
+    se <- (log(uci)-log(lci))/(2*1.96)         #.86 0.72 to 1.04 (log se)
+    x <- seq(0.01, 0.50,by = .005)
+    lci <- exp(log(hr) - (qnorm(x) * se))
+    uci <- exp(log(hr) + (qnorm(x) * se))
+    lci <- rev(lci)
+    hr <- rev(c(uci, lci))
+    yy <- 2*x
+    yy <- c(yy,rev(yy))
+    ss <- -log(yy, base=2)
+    df1 <- data.frame(hr,ss)
+    df1 <- df1[-297,]
+    s <- ggplot(df1, aes( hr,ss)) +
+        geom_line() +
+        xlim(0.01,1.2) +
+        scale_x_continuous(trans='log10') +
+        ylab("Bits of information against HR (binary S value)") +
+        xlab("Hazard ratio (Log scale)") +
+        labs (subtitle = "S-Values (surprisals) for a range of hazard ratios (HR)") +
+        geom_vline(xintercept=1.0, color = "green") +
+        annotate("text", x=1,y=.4, label="null hypothesis") +
+        theme_bw()
+        return(s)
+}
+
+# function to make S dataset (already intrinsically done in pv_graph and s_graph) but this allows it to exported
+
+s.make <- function(h, uci, lci){
+    x <- seq(0.0001, 0.50,length.out = 100)   # p value  x <- seq(0.01, 0.50,by = .005) 
+    se <- (log(uci)-log(lci))/(2*1.96) 
+    p1 <- exp(log(h) - (qnorm(x) * se))
+    p2 <- exp(log(h) + (qnorm(x) * se))
+    p2 <- rev(p2)
+    hr <- rev(c(p1,p2[-1]))
+    prob <- c(2*x, rev(2*x)[-1])
+    s <- -log(prob, base=2)
+    df1 <- data.frame(hr, prob, s)
+    return(df1)
+}
+
+```
+
+## PARAGON study - NEJM
+
+```{r}
+mat <- matrix(c(894,1525,1009,1394), nrow=2 )
+rownames(mat) <- c("Drug", "Placebo") 
+colnames(mat) <- c("Event+", "Event-") 
+kable(mat)
+
+epiR::epi.2by2(mat, outcome = "as.rows")
+prop.test(c(894,1009), c(2419,2403))
+
+mat <- matrix(c(894,1525,1009,1394), nrow=2 )
+rownames(mat) <- c("Drug", "Placebo") 
+colnames(mat) <- c("Event+", "Event-") 
+kable(mat)
+
+epiR::epi.2by2(mat, outcome = "as.rows")
+prop.test(c(894,1009), c(2419,2403))
+
+# looking at the strength of the evidence from a frequentist viewpoint
+s_graph(0.87, 1.01, 0.75)
+head(s.make(0.87, 1.01, 0.75))
+
+```
+
+## Bayesian analysis - composite endpoint
+Using non-informative prior
+```{r}
+# logs are likely normally distibuted
+mean_p <- log(0.87)
+sd_p <- (log(1.01)-log(.75))/3.92
+
+pnorm(0,mean_p,sd_p) # probability < RR =1
+pnorm(-0.1393,mean_p,sd_p) # probability of 13% reduction -> RR = .87, log(.87) = -..1393
+pnorm(-.1625,mean_p,sd_p) # probability of 10% reduction -> RR = .85, log(.9) = -.1625
+
+pnorm(0,mean_p,sd_p) # probability < RR =1
+
+pnorm(-.1625,mean_p,sd_p) # probability of 15% reduction -> RR = .85, log(.85) = -.1625
+
+pnorm(-.2877,mean_p,sd_p) # probability of 25% reduction -> RR = .75, log(.75) = -.2877
+
+
+
+
+para <- ggplot(data = data.frame(x = c(-.4,.25)), aes(x)) +
+  stat_function(fun = dnorm, args = list(mean = mean_p, sd = sd_p), colour = "orange", size=2) +
+  scale_x_continuous(name = "Log relative risk") +
+  scale_y_continuous(name = "Density") +
+  labs(title="PARAGON PDF of log(relative risk) for primary outcome - ",
+       subtitle = "Bayesian model with vaguely informative prior", caption="AUC = area under the curve\n     PDF = probability density function") +
+  geom_vline(xintercept=mean_p) +
+  annotate("text", label = "Black vertical line = mean \nlog(RR) =-0.139 or RR = 0.87", x = -.1, y = 5, color = "black", hjust=0) +
+  annotate("text", label = "Grey AUC = probability\n(38%) >= 15% decrease\nin relative risk with\nsacubitril–valsartan", x = -.4, y = 4.0, color = "black", hjust=0) +
+  annotate("text", label = "Grey + Yellow AUC = probability\ndecrease in relative risk (97%)\nwith sacubitril–valsartan,\nyellow area (59%) =region\nof practical equivalence", x = -0.045, y = 3, color = "black", hjust=0) +
+  theme_classic() +
+  stat_function(fun = dnorm, args = list(mean = mean_p, sd = sd_p), xlim = c(-.4,-.1625), geom = "area", fill= "gray",alpha = 0.2) +
+  stat_function(fun = dnorm, args = list(mean = mean_p, sd = sd_p), xlim = c(-.1625, 0), geom = "area", fill= "yellow",alpha = 0.2) 
+
+para
+pdf("output/para.pdf")
+para
+dev.off()
+
+ggsave("output/para.png")  
+
+
+
+```
+### Bayes factor
+```{r fig.width=12, fig.height=5}
+para +
+   stat_function(fun = dnorm, args = list(mean = 0, sd = sd_p), xlim = c(-.2, .25), color="gray",alpha = 0.6)
+
+# Bayes factor by hand
+cat("Bayes factor by graphical calculations")
+dnorm(-.139,0,sd_p) /dnorm(-.139,-.139,sd_p)
+
+#Bayes factor function
+bayesF <- function(z){
+  bf <- exp((z^2)/2)
+  1/bf
+}
+
+temp <- scale(rnorm(10000, mean_p, sd_p))
+z_score <- qnorm(.970, mean(temp), sd(temp)) #p =0.06 so .03 in uppper tail so need z value for qnorm(0.97)
+cat("Bayes factor using mathematical equation")
+bayesF(z_score)
+
+para_bf <- ggplot(data = data.frame(x = c(-.4,.25)), aes(x)) +
+  stat_function(fun = dnorm, args = list(mean = mean_p, sd = sd_p), colour = "orange", size=2) +
+  stat_function(fun = dnorm, args = list(mean = 0, sd = sd_p), xlim = c(-.25, .25), color="gray",alpha = 0.6, size=2) +
+  scale_x_continuous(name = "Log relative risk") +
+  scale_y_continuous(name = "Density") +
+  labs(title="Calculation of a Bayes factor (likelihood ratio)",
+       subtitle = "for null hypothesis (Ho) vs. maximally supported alternative hypothesis (Ha)", caption="PDF = probability density function") +
+  geom_vline(xintercept=mean_p) +
+  annotate("text", label = "Black vertical line =\nmean log(RR) =\n-0.139 or RR = 0.87", x = -.4, y = 4.8, color = "black",  hjust = 0) +
+  annotate("text", label = "Orange curve =\nPDF for\nobserved data", x = -.40, y = 3.3, color = "black",  hjust = 0) +
+  annotate("text", label = "Grey curve curve =\nPDF for the\nnull hypothesis", x = 0.095, y = 4.5, color = "black",  hjust = 0) +
+  theme_classic() +
+  annotate("text", label = "*", x = -.139, y = 5.15, color = "red", size=15) +
+  annotate("text", label = "*", x = -.139, y = .9, color = "gray", size=15) +
+  annotate("text", label = "Bayes factor =\n support for Ho / support Ha\n = grey * /red *\n= 0.98 / 5.25 \n = 0.19", x = 0, y = 2.0, hjust=0, color = "black") 
+
+para_bf
+pdf("output/para_bf.pdf")
+para_bf
+dev.off()
+ 
+ggsave("output/para_bf.png")  
+
+library(patchwork)
+para_2 <- para + para_bf + plot_annotation("Figure 2", tag_levels = 'A')
+para_2
+pdf("output/para_fig2.pdf")
+para_2
+dev.off()
+
+ggsave("output/para_fig2.png", dpi = 300)  
+
+ 
+```
+
